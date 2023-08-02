@@ -1,0 +1,1 @@
+Store your API and database credentials in this directory.
