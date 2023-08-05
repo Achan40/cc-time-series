@@ -166,3 +166,6 @@ apicreds.py
 
 # datafolder
 data/
+
+# DS store
+**/.DS_Store
