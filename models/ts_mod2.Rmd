@@ -1,0 +1,135 @@
+```{r}
+library(forecast)
+library(ggplot2)
+```
+
+
+# Load Data
+```{r}
+# Monthly time series: 2001-01 -> 2023-06
+df <- read.csv(file = "../data/cc_monthly_final.csv")
+head(df)
+```
+```{r}
+# load as timeseries object
+cc_ts <- ts(df$monthly_crimes, start = c(min(df$year), min(df$month)), frequency = 12)
+print(cc_ts)
+```
+
+# Timeplot
+
+The yearly plot of the counts of crime in the city of chicago show a downward linear trend in incidents of crime between the years of 2001-2016. Something to note is that between the years of 2016 and 2020, the trend appears to flatten out a bit. Another interesting thing to note is that we see a sharp drop in April of 2020, likely due to the Covid-19 pandemic and subsequent lockdown which started in March 2020. As time passes however, this decrease does not appear to hold and appears to return to "normal" levels.
+```{r}
+autoplot(cc_ts) + geom_vline(xintercept = 2020.3, linetype = "dashed", color = "blue")
+```
+
+# Visiualize Level Component
+
+Applying seasonal differencing at every 12th lag to remove the trend component, we can visualize the level of the data over time much more clearly. The sharp drop in April of 2020 and subsequent slow rise is as expected.
+```{r}
+cc_ts_diff <- diff(cc_ts, lag = 12)
+
+autoplot(cc_ts_diff, ylab="Seasonal Differencing")
+```
+
+# Model the unperturbed process
+
+Taking the data before April 2020 as unperturbed, we use auto.arima to identify an appropriate 𝐴𝑅𝐼𝑀𝐴(𝑝, 𝑑, 𝑞)(𝑃, 𝑄, 𝐷)𝑠 model.
+```{r}
+# data ranges from Jan 2001 up to and including March 2020
+cc_ts_pre_covid <- ts(cc_ts[1:231],start = c(min(df$year), min(df$month)), frequency = 12)
+autoplot(cc_ts_pre_covid)
+```
+
+```{r}
+# auto arima
+mod_pre_covid <- auto.arima(cc_ts_pre_covid, seasonal=TRUE, stepwise=FALSE)
+summary(mod_pre_covid)
+```
+
+The Ljung-Box test shows a p-value of .2901, at an alpha=.10 level, there is evidence to accept H0: residuals do not show autocorrelation. We say that our model for the unperturbed data does not show lack of fit. 
+```{r}
+# checking residuals
+checkresiduals(mod_pre_covid)
+```
+
+# Intervention Analysis
+
+Putting it all together, we can begin to model the whole process. Hold the last 24 periods for our test set. 
+
+```{r}
+cc_ts_train <-ts(cc_ts[1:246],start = c(min(df$year), min(df$month)), frequency = 12)
+cc_ts_test <- ts(cc_ts[247:270],start = c(2021, 7), frequency = 12)
+```
+
+Model a pulse intervention where there is an instantaneous effect in April 2020 with an effect that gradually dies out over time. Note that we take the log of the depenedent variable.
+```{r}
+mod_inter <- arimax(log(cc_ts_train), 
+                    order=c(0,1,2), 
+                    seasonal = list(order=c(1,1,2), period=12),
+                    xtransf=data.frame(covid=1*(seq(cc_ts_train)==232), covid=1*(seq(cc_ts_train)==232)),
+                    transfer = list(c(0,0), c(1,0)),
+                    method = 'ML'
+                    )
+mod_inter
+```
+
+Plotting the estimated effects of covid on crime in chicago, we see a sharp drop during April 2020, followed by an equally quick rise. This is behavior isn't great for a pulse intervention followed by decay. We may want to model a temporary level shift instead.
+```{r}
+# Fitted model estimates that the covid lockdowns reduced overall crime by {1 - exp(w0- w1)} * 100 percent in April 2020, and crime k months later was lowered by {1 - exp(w1 * w2^k)}
+w0 <- as.numeric(mod_inter$coef["covid-MA0"])
+w1 <- as.numeric(mod_inter$coef["covid.1-MA0"])
+w2 <- as.numeric(mod_inter$coef["covid.1-AR1"])
+
+covid = 1*(seq(cc_ts_train)==232)
+plot(ts(covid * (w0) + filter(covid, filter = w2, method = 'recursive', side =1) *
+          (w1), frequency = 12, start = 2001), ylab = 'Covid-19 Effects', type = 'h')
+abline(h=0)
+```
+
+```{r}
+checkresiduals(mod_inter)
+```
+
+
+# Intervention Model 
+In this model, we take in account a temporary level shift caused by covid-19. Level shift duration between April 2020 up to and including August 2020
+```{r}
+covid_lockdown <- c(rep(0, length(cc_ts_train)))
+covid_lockdown[232:237] <- 1
+
+mod_inter_shift <- Arima(cc_ts_train, 
+                    order=c(0,1,2), 
+                    seasonal = list(order=c(1,1,2), period=12),
+                    xreg = covid_lockdown
+                    )
+summary(mod_inter_shift)
+```
+
+```{r}
+checkresiduals(mod_inter_shift)
+```
+
+```{r}
+arr <- c(rep(0, length(cc_ts_test)))
+
+preds <- predict(mod_inter_shift, n.ahead = 24, newxreg = arr)
+preds
+```
+
+```{r}
+autoplot(cc_ts_train, series="train") +
+  autolayer(test)+
+  autolayer(ts(preds$pred, start = c(2021, 7), frequency = 12), series="forecasted")+
+  ggtitle("Forecasts from Intervention Model") +
+  xlab("Year") + ylab("Crime")
+```
+
+```{r}
+accuracy(preds$pred, test)
+```
+
+
+
+
+
